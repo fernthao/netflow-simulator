@@ -241,23 +241,21 @@ void print_packet(char *trace_file) {
             seqno = to_string(pkt.tcph.seq);
             ackno = pkt.tcph.ack == 1 ? to_string(pkt.tcph.ack_seq) : "-";
         }
-        uint16_t  paylen = iplen - IP_HDR_LEN - thlen;
+        paylen = iplen - IP_HDR_LEN - thlen;
 
         // Print format:
         //  ts sip sport dip dport iplen protocol thlen paylen seqno ackno
-        printf("%s %s %u %s %u %u %c %u %u %s %s",
-                timestamp,
-                sip,
-                sport,
-                dip,
-                dport,
-                iplen,
-                protocol,
-                thlen,
-                paylen,
-                seqno,
-                ackno
-              ); 
+        cout << timestamp << " " 
+             << sip << " " 
+             << to_string(sport) << " " 
+             << dip << " " 
+             << to_string(dport) << " "
+             << to_string(iplen) << " "
+             << protocol << " "
+             << thlen << " "
+             << paylen << " "
+             << seqno << " "
+             << ackno << endl;
     }
 }
 
