@@ -145,9 +145,9 @@ bool next_pkt (packet* pkt, FILE* file)
 }
 
 string dotted_quad(uint32_t ip) {
-    return to_string(ip & 0xFF000000) + "." + 
-           to_string(ip & 0xFF0000) + "." + 
-           to_string(ip & 0xFF00) + "." + 
+    return to_string((ip >> 24) & 0xFF) + "." + 
+           to_string((ip >> 16) & 0xFF) + "." + 
+           to_string((ip >> 8) & 0xFF) + "." + 
            to_string(ip & 0xFF);
 }
 
@@ -213,7 +213,6 @@ void print_packet(char *trace_file) {
         if (pkt.iph.protocol != UDP && pkt.iph.protocol != TCP) {
             continue;
         }
-        cout << "Hello";
         // Format header fields
         // timestamp
         ostringstream oss;
@@ -261,7 +260,7 @@ void print_packet(char *trace_file) {
              << to_string(dport) << " "
              << to_string(iplen) << " "
              << protocol << " "
-             << thlen << " "
+             << to_string(thlen) << " "
              << paylen << " "
              << seqno << " "
              << ackno << endl;
@@ -269,7 +268,14 @@ void print_packet(char *trace_file) {
 }
 
 void netflow (char* trace_file) {
-    cout << "netflow mode" << endl;
+    // 1. Read 1 packet
+    // 2. Store the 5-tuple that identify the flow
+    //      source IP address, source transport port
+    //         number, destination IP address, destination transport port number and transport protocol
+    // 3. While the next packet has the same matching 5 tuple, update flow info
+    // 4. Detecting end of flow - non-matching tuple, print out flow info and reset
+    //  sip sport dip dport protocol first_ts duration tot_pkts tot_payload_bytes
+    
 }
 
 void rtt (char* trace_file) {
