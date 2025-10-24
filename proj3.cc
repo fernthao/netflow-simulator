@@ -61,36 +61,36 @@ struct packet {
 
 bool next_pkt (packet* pkt, FILE* file)
 {
-    if (fread(pkt, MIN_PKT_SZ, 1, file) != 1) {
+    // Read timestamp (8 bytes)
+    if (fread(&pkt->timestamp, sizeof(pkt->timestamp), 1, file) != 1) {
+        return false;
+    }
+    // Read ethernet header (14 bytes)
+    if (fread(&pkt->ethh, sizeof(pkt->ethh), 1, file) != 1) {
         return false;
     }
 
-    // read the ethernet header type first
-    pkt->ethh.ether_type = ntohs(pkt->ethh.ether_type);
+    // Convert timestamp to host byte order 
+    pkt->timestamp.tv_sec = ntohl(pkt->timestamp.tv_sec);
+    pkt->timestamp.tv_usec = ntohl(pkt->timestamp.tv_usec);
 
+    // ethernet type
+    pkt->ethh.ether_type = ntohs(pkt->ethh.ether_type);
     // to ignore if not ipv4
     if (pkt->ethh.ether_type != IPv4) {
         pkt->isIP = false;
         return true;
-    } 
-    
+    }
     pkt->isIP = true;
 
-    // read the IP header 
-    // TODO is there better way than pointer arithmetic
-    if (fread(pkt + MIN_PKT_SZ, IP_HDR_LEN, 1, file) != 1) {
+    // read the IP header (20 bytes)
+    if (fread(&pkt->iph, IP_HDR_LEN, 1, file) != 1) {
         return false;
     }
-
     // check ip header protocol, to ignore if not udp/tcp
     if (pkt->iph.protocol != UDP && pkt->iph.protocol != TCP) {
         return true;
     }
-
-    // Convert the timestamp to host byte order
-    pkt->timestamp.tv_sec = ntohl(pkt->timestamp.tv_sec);
-    pkt->timestamp.tv_usec = ntohl(pkt->timestamp.tv_usec);
-
     // Convert IP header to host byte order
     pkt->iph.tot_len = ntohs(pkt->iph.tot_len);
     pkt->iph.id = ntohs(pkt->iph.id);
@@ -102,7 +102,7 @@ bool next_pkt (packet* pkt, FILE* file)
     // udp 
     if (pkt->iph.protocol == UDP) {
         // read the udp header (fixed length)
-        if (fread(pkt + MIN_PKT_SZ + IP_HDR_LEN, UDP_HDR_LEN,1, file) != 1) {
+        if (fread(&pkt->udph, UDP_HDR_LEN,1, file) != 1) {
             return false;
         }
         // Convert udp header to host byte order
@@ -115,23 +115,28 @@ bool next_pkt (packet* pkt, FILE* file)
     // tcp
     else if (pkt->iph.protocol == TCP) {
         // read the minimum length of tcp header
-        if (fread(pkt + MIN_PKT_SZ + IP_HDR_LEN + UDP_HDR_LEN, TCP_HDR_LEN_MIN, 1, file) != 1) {
+        if (fread(&pkt->tcph, TCP_HDR_LEN_MIN, 1, file) != 1) {
             return false;
         }
 
         // Data offset field = tcp header length in 32-bit words
-        // Convert to length in 16-bit bytes 
+        // Convert to length in 8-bit bytes 
             // TODO 2 structs defined in tcp.h, use th_off or doff?
-        uint8_t tcphlen = 2 * pkt->tcph.doff;
+        uint8_t tcphlen = 4 * pkt->tcph.doff;
 
-        // Read tcp options
-        if (fread(pkt + MIN_PKT_SZ + IP_HDR_LEN + UDP_HDR_LEN + TCP_HDR_LEN_MIN, tcphlen - TCP_HDR_LEN_MIN, 1, file) != 1) {
-            return false;
+         // Skip TCP options (if any)
+        int options_len = tcphlen - TCP_HDR_LEN_MIN;
+        if (options_len > 0) {
+            if (fseek(file, options_len, SEEK_CUR) != 0) {
+                return false;
+            }
         }
 
         // Convert to host byte order
         pkt->tcph.source = ntohs(pkt->tcph.source);
         pkt->tcph.dest = ntohs(pkt->tcph.dest);
+        pkt->tcph.seq = ntohl(pkt->tcph.seq);
+        pkt->tcph.ack_seq = ntohl(pkt->tcph.ack_seq);
         pkt->tcph.window = ntohs(pkt->tcph.window);
         pkt->tcph.check = ntohs(pkt->tcph.check);
         pkt->tcph.urg_ptr = ntohs(pkt->tcph.urg_ptr);
@@ -140,7 +145,10 @@ bool next_pkt (packet* pkt, FILE* file)
 }
 
 string dotted_quad(uint32_t ip) {
-    return to_string(ip & 0xFF000000) + "." + to_string(ip & 0xFF0000) + "." + to_string(ip & 0xFF00) + "." + to_string(ip & 0xFF);
+    return to_string(ip & 0xFF000000) + "." + 
+           to_string(ip & 0xFF0000) + "." + 
+           to_string(ip & 0xFF00) + "." + 
+           to_string(ip & 0xFF);
 }
 
 void usage (char *progname)
@@ -205,7 +213,7 @@ void print_packet(char *trace_file) {
         if (pkt.iph.protocol != UDP && pkt.iph.protocol != TCP) {
             continue;
         }
-
+        cout << "Hello";
         // Format header fields
         // timestamp
         ostringstream oss;
@@ -237,9 +245,10 @@ void print_packet(char *trace_file) {
             protocol = 'T';
             sport = pkt.tcph.source;
             dport = pkt.tcph.dest;
-            thlen = pkt.tcph.doff;
+            // TCP header length in bytes
+            thlen = pkt.tcph.doff * 4;
             seqno = to_string(pkt.tcph.seq);
-            ackno = pkt.tcph.ack == 1 ? to_string(pkt.tcph.ack_seq) : "-";
+            ackno = (pkt.tcph.ack == 1) ? to_string(pkt.tcph.ack_seq) : "-";
         }
         paylen = iplen - IP_HDR_LEN - thlen;
 
