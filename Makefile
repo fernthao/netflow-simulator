@@ -8,7 +8,7 @@ TARGETS=proj3
 
 all: $(TARGETS)
 
-proj2: proj3.o
+proj3: proj3.o
 	$(LD) $(LDFLAGS) -o $@ $<
 
 %.o: %.c
