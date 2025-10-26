@@ -17,6 +17,7 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdlib>
+#include <cmath>
 #include <unistd.h>
 #include <cstdint>
 #include <cstdio>
@@ -34,6 +35,7 @@ using namespace std;
 #define ARG_NETFLOW_MODE   0x2
 #define ARG_RTT_MODE 0x4
 #define ARG_TRACE_FILE 0x8
+#define ARG_DEBUG 0x16
 #define MIN_PKT_SZ 22
 #define IPv4 0x0800
 #define IP_HDR_LEN 20
@@ -41,14 +43,16 @@ using namespace std;
 #define TCP 6
 #define UDP_HDR_LEN 8
 #define TCP_HDR_LEN_MIN 20 
+#define NO_BYTES_PER_DOFF_WORD 4
+#define NO_USEC_PER_SEC 1e6
 
 unsigned short cmd_line_flags = 0;
 char *trace_file = NULL;
 
-typedef struct {
+struct timev {
     uint32_t tv_sec;
     uint32_t tv_usec;
-} timev;
+};
 
 struct packet {
     timev timestamp;
@@ -122,7 +126,7 @@ bool next_pkt (packet* pkt, FILE* file)
         // Data offset field = tcp header length in 32-bit words
         // Convert to length in 8-bit bytes 
             // TODO 2 structs defined in tcp.h, use th_off or doff?
-        uint8_t tcphlen = 4 * pkt->tcph.doff;
+        uint8_t tcphlen = NO_BYTES_PER_DOFF_WORD * pkt->tcph.doff;
 
          // Skip TCP options (if any)
         int options_len = tcphlen - TCP_HDR_LEN_MIN;
@@ -149,6 +153,13 @@ string dotted_quad(uint32_t ip) {
            to_string((ip >> 16) & 0xFF) + "." + 
            to_string((ip >> 8) & 0xFF) + "." + 
            to_string(ip & 0xFF);
+}
+
+string format_ts(timev time) {
+    ostringstream oss;
+    oss << time.tv_sec << '.'
+        << setw(6) << setfill('0') << time.tv_usec;
+    return oss.str();  
 }
 
 void usage (char *progname)
@@ -184,6 +195,8 @@ void parseargs (int argc, char *argv [])
               cmd_line_flags |= ARG_TRACE_FILE;
               trace_file = optarg;
               break;
+            case 'd':
+              cmd_line_flags |= ARG_DEBUG;
             default:
               usage (argv [0]);
         }
@@ -215,10 +228,7 @@ void print_packet(char *trace_file) {
         }
         // Format header fields
         // timestamp
-        ostringstream oss;
-        oss << pkt.timestamp.tv_sec << '.'
-            << setw(6) << setfill('0') << pkt.timestamp.tv_usec;
-        string timestamp = oss.str();    
+        string timestamp = format_ts(pkt.timestamp);   
         
         // ip 
         string sip = dotted_quad(pkt.iph.saddr);
@@ -245,7 +255,7 @@ void print_packet(char *trace_file) {
             sport = pkt.tcph.source;
             dport = pkt.tcph.dest;
             // TCP header length in bytes
-            thlen = pkt.tcph.doff * 4;
+            thlen = pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD;
             seqno = to_string(pkt.tcph.seq);
             ackno = (pkt.tcph.ack == 1) ? to_string(pkt.tcph.ack_seq) : "-";
         }
@@ -267,19 +277,118 @@ void print_packet(char *trace_file) {
     }
 }
 
+timev add_tv(timev tv1, timev tv2) {
+    float time1 = tv1.tv_sec + (tv1.tv_usec / NO_USEC_PER_SEC);
+    float time2 = tv2.tv_sec + (tv2.tv_usec / NO_USEC_PER_SEC);
+    float result = time1 + time2;
+    uint32_t result_sec = floor(result);
+    uint32_t result_usec = (result - result_sec) * NO_USEC_PER_SEC;
+    return timev{result_sec, result_usec};
+}
+
 void netflow (char* trace_file) {
     // 1. Read 1 packet
     // 2. Store the 5-tuple that identify the flow
-    //      source IP address, source transport port
-    //         number, destination IP address, destination transport port number and transport protocol
+    //      source IP address, 
+    //      source transport port
+    //      destination IP address, 
+    //      destination transport port
+    //      transport protocol
     // 3. While the next packet has the same matching 5 tuple, update flow info
     // 4. Detecting end of flow - non-matching tuple, print out flow info and reset
-    //  sip sport dip dport protocol first_ts duration tot_pkts tot_payload_bytes
+    //      sip sport dip dport protocol first_ts duration tot_pkts tot_payload_bytes
+
+        uint32_t sip;
+        uint16_t sport;
+        uint32_t dip;
+        uint16_t dport;
+        uint8_t protocol;
+        timev first_ts;
+        timev duration; // usec = sec/ 1e6
+        // TODO is int big enough
+        int tot_pkts;
+        int tot_payload_bytes;
+        bool flowExist = false;
+    packet pkt;
+    FILE* file = fopen(trace_file, "rb");
     
+    if (file == nullptr) {
+        fprintf(stderr, "Error: could not open file %s \n", trace_file);
+        exit(1);
+    }
+
+    while (next_pkt(&pkt, file)) {
+        // ignore if not ip
+        if (!pkt.isIP) {
+            continue;
+        }
+        // ignore if not udp or tcp
+        if (pkt.iph.protocol != UDP && pkt.iph.protocol != TCP) {
+            continue;
+        }
+        // if udp, 
+        // if new flow
+        if (pkt.iph.saddr != sip ||
+            pkt.iph.daddr != dip ||
+            pkt.iph.protocol != protocol ||
+            ((pkt.iph.protocol == UDP) && (pkt.udph.source != sport)) ||
+            ((pkt.iph.protocol == UDP) && (pkt.udph.dest != dport)) ||
+            ((pkt.iph.protocol == TCP) && (pkt.tcph.source != sport)) ||
+            ((pkt.iph.protocol == TCP) && (pkt.tcph.dest != dport)) 
+        ) {
+            // print out current flow if exist
+    //      sip sport dip dport protocol first_ts duration tot_pkts tot_payload_bytes
+           if (flowExist) {
+                char protocol = pkt.iph.protocol == UDP ? 'U' : 'T';
+                cout << dotted_quad(sip) << " " 
+                << to_string(sport) << " " 
+                << dotted_quad(dip) << " " 
+                << to_string(dport) << " " 
+                << protocol << " "
+                << format_ts(first_ts) << " "
+                << format_ts(duration) << " "
+                << tot_pkts << " "
+                << tot_payload_bytes << endl;
+           } 
+
+            // start new flow (resetting fields)
+            flowExist = true;
+            sip = pkt.iph.saddr;
+            dip = pkt.iph.daddr;
+            protocol = pkt.iph.protocol;
+            sport = pkt.iph.protocol == UDP ? pkt.udph.source : pkt.tcph.source;
+            dport = pkt.iph.protocol == UDP ? pkt.udph.dest : pkt.tcph.dest;
+            first_ts = pkt.timestamp;
+            duration = timev{0,0};
+            tot_pkts = 1;
+            tot_payload_bytes = pkt.iph.protocol == UDP ? pkt.iph.tot_len - IP_HDR_LEN - UDP_HDR_LEN
+                                                        : pkt.iph.tot_len - IP_HDR_LEN - (pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD);
+        } else {
+            // update current flow with packet
+            duration = add_tv(duration, pkt.timestamp);
+            tot_pkts++;
+            tot_payload_bytes += pkt.iph.protocol == UDP ? pkt.iph.tot_len - IP_HDR_LEN - UDP_HDR_LEN
+                                                         : pkt.iph.tot_len - IP_HDR_LEN - (pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD);
+        }
+    }
+    // last flow of the file
+    cout << dotted_quad(sip) << " " 
+    << to_string(sport) << " " 
+    << dotted_quad(dip) << " " 
+    << to_string(dport) << " " 
+    << protocol << " "
+    << format_ts(first_ts) << " "
+    << format_ts(duration) << " "
+    << tot_pkts << " "
+    << tot_payload_bytes << endl;
 }
 
 void rtt (char* trace_file) {
     cout << "rtt mode" << endl;
+}
+
+void debug() {
+
 }
 
 int main (int argc, char *argv [])
@@ -300,6 +409,10 @@ int main (int argc, char *argv [])
     }
     else if (cmd_line_flags == (ARG_RTT_MODE | ARG_TRACE_FILE)) {
         rtt(trace_file);
+    }
+    // TODO: debugging, to delete
+    else if (cmd_line_flags == ARG_DEBUG) {
+        debug();
     }
     else
     {
