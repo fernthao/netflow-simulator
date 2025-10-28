@@ -80,10 +80,11 @@ struct tcp_flow_info {
     uint32_t sip;
     uint16_t sport;
     uint32_t dip;
-    uint16_t dport;
+    uint32_t dport;
     timev first_ts;
     uint32_t first_seq;
-    std::map<uint32_t, timev> acks;
+    bool has_ack;  // Whether we've found an ACK > first_seq
+    timev ack_ts;  // Timestamp of the first ACK > first_seq
 };
 
 // Custom hasher for flow_key

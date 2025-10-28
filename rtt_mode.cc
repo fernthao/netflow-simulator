@@ -43,56 +43,53 @@ void rtt(char* trace_file) {
             dport
         };
 
-        if (flows.find(cur_flow_id) != flows.end()) {
-            // Update current flow with packet info
-            flows[cur_flow_id].acks.insert({pkt.tcph.ack_seq, pkt.timestamp});
-        } else {
-            // Create new flow with first packet that contains data
-            if (pkt.iph.tot_len > IP_HDR_LEN + pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD) {
-                std::map<uint32_t, timev> acks;
-                acks.insert({pkt.tcph.ack_seq, pkt.timestamp});
-                flows[cur_flow_id] = tcp_flow_info{
-                    pkt.iph.saddr,
-                    sport,
-                    pkt.iph.daddr,
-                    dport,
-                    pkt.timestamp,
-                    pkt.tcph.seq,
-                    acks
-                };
+        // Check if this packet contains data
+        bool has_data = pkt.iph.tot_len > IP_HDR_LEN + pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD;
+        
+        // Create flow entry only for the first packet with data
+        if (has_data && flows.find(cur_flow_id) == flows.end()) {
+            flows[cur_flow_id] = tcp_flow_info{
+                pkt.iph.saddr,
+                sport,
+                pkt.iph.daddr,
+                dport,
+                pkt.timestamp,
+                pkt.tcph.seq,  // Store S1 (sequence number of first data packet)
+                false,         // No ACK found yet
+                timev{0, 0}    // Since no ACK, no timestamp -> use placeholder
+            };
+        }
+        
+        // Check if this packet ACKs data in the opposite direction's flow
+        tcp_flow_key opposite_flow = tcp_flow_key{
+            pkt.iph.daddr,
+            dport,
+            pkt.iph.saddr,
+            sport
+        };
+        
+        // If opposite flow exists and we haven't found an ACK yet
+        if (flows.find(opposite_flow) != flows.end() && !flows[opposite_flow].has_ack) {
+            // Check if this ACK > S1 of the opposite flow
+            if (pkt.tcph.ack_seq > flows[opposite_flow].first_seq) {
+                flows[opposite_flow].has_ack = true;
+                flows[opposite_flow].ack_ts = pkt.timestamp;
             }
         }
     }
 
     // Print flow information
     for (const auto& pair : flows) {
-        // Consider current pair the sending direction
-        uint32_t first_seq = pair.second.first_seq;
-        timev rtt_tv;
         timev t1 = pair.second.first_ts;
-        bool noRTT = true;
+        std::string rtt_str = "-";
 
-        // Find flow of opposite direction
-        tcp_flow_key opposite_flow = tcp_flow_key{
-            pair.first.dip, 
-            pair.first.dport,
-            pair.first.sip,
-            pair.first.sport
-        };
-        
-        if (flows.find(opposite_flow) != flows.end()) {
-            // Found opposite flow 
-            std::map<uint32_t, timev> acks = flows[opposite_flow].acks;
-            // Look for the first packet with an acknowledgment (ACK) number greater than seq # of sending packet
-            if (acks.upper_bound(first_seq) != acks.end()) {
-                noRTT = false;
-                // Calculate RTT = t2 - t1
-                timev t2 = acks.upper_bound(first_seq)->second;
-                rtt_tv = deduct_tv(t2, t1);
-            }
+        // Check if we found an ACK for this flow
+        if (pair.second.has_ack) {
+            // Calculate RTT = t2 - t1
+            timev t2 = pair.second.ack_ts;
+            timev rtt_tv = deduct_tv(t2, t1);
+            rtt_str = format_ts(rtt_tv);
         }
-        
-        std::string rtt_str = noRTT ? "-" : format_ts(rtt_tv);
         
         std::cout << dotted_quad(pair.first.sip) << " " 
                   << std::to_string(pair.first.sport) << " " 
