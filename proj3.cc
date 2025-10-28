@@ -28,6 +28,8 @@
 #include <netinet/tcp.h>
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <tuple>
 
 using namespace std;
 
@@ -35,7 +37,6 @@ using namespace std;
 #define ARG_NETFLOW_MODE   0x2
 #define ARG_RTT_MODE 0x4
 #define ARG_TRACE_FILE 0x8
-#define ARG_DEBUG 0x16
 #define MIN_PKT_SZ 22
 #define IPv4 0x0800
 #define IP_HDR_LEN 20
@@ -195,8 +196,6 @@ void parseargs (int argc, char *argv [])
               cmd_line_flags |= ARG_TRACE_FILE;
               trace_file = optarg;
               break;
-            case 'd':
-              cmd_line_flags |= ARG_DEBUG;
             default:
               usage (argv [0]);
         }
@@ -277,39 +276,79 @@ void print_packet(char *trace_file) {
     }
 }
 
-timev add_tv(timev tv1, timev tv2) {
-    float time1 = tv1.tv_sec + (tv1.tv_usec / NO_USEC_PER_SEC);
-    float time2 = tv2.tv_sec + (tv2.tv_usec / NO_USEC_PER_SEC);
-    float result = time1 + time2;
-    uint32_t result_sec = floor(result);
-    uint32_t result_usec = (result - result_sec) * NO_USEC_PER_SEC;
-    return timev{result_sec, result_usec};
+timev deduct_tv(timev tv, timev deduct_by) {
+    int32_t sec = static_cast<int32_t>(tv.tv_sec) - static_cast<int32_t>(deduct_by.tv_sec);
+    int32_t usec = static_cast<int32_t>(tv.tv_usec) - static_cast<int32_t>(deduct_by.tv_usec);
+    if (usec < 0) {
+        sec -= 1;
+        usec += 1000000;
+    }
+    return timev{static_cast<uint32_t>(sec), static_cast<uint32_t>(usec)};
 }
 
-void netflow (char* trace_file) {
-    // 1. Read 1 packet
-    // 2. Store the 5-tuple that identify the flow
-    //      source IP address, 
-    //      source transport port
-    //      destination IP address, 
-    //      destination transport port
-    //      transport protocol
-    // 3. While the next packet has the same matching 5 tuple, update flow info
-    // 4. Detecting end of flow - non-matching tuple, print out flow info and reset
-    //      sip sport dip dport protocol first_ts duration tot_pkts tot_payload_bytes
+struct flow_key {
+    uint32_t sip;
+    uint16_t sport;
+    uint32_t dip;
+    uint16_t dport;
+    uint8_t protocol;
+    bool operator==(const flow_key& other) const {
+        return (sip == other.sip &&
+                sport == other.sport &&
+                dip == other.dip &&
+                dport == other.dport &&
+                protocol == other.protocol
+            );
+    }
+};
 
+struct flow_info {
         uint32_t sip;
         uint16_t sport;
         uint32_t dip;
         uint16_t dport;
         uint8_t protocol;
         timev first_ts;
-        timev duration; // usec = sec/ 1e6
+        timev last_ts;
         // TODO is int big enough
         int tot_pkts;
         int tot_payload_bytes;
-        bool flowExist = false;
+};
+
+// custom hasher for flow_key
+struct key_hasher {
+  size_t operator()(const flow_key& k) const
+  {
+    size_t seed = 0;
+    hash<uint32_t> hasher32;
+    hash<uint16_t> hasher16;
+    hash<uint8_t> hasher8;
+    // constexpr evaluates var at compile time instead of runtime -> performance optimization
+    constexpr size_t kMul = 0x9e3779b97f4a7c15ULL; // from Boost::hash_combine
+
+    auto mix = [&](size_t h) {
+        h ^= (h >> 30);
+        h *= 0xbf58476d1ce4e5b9ULL;
+        h ^= (h >> 27);
+        h *= 0x94d049bb133111ebULL;
+        h ^= (h >> 31);
+        seed ^= h + kMul + (seed << 6) + (seed >> 2);
+    };
+
+    mix(hasher32(k.sip));
+    mix(hasher16(k.sport));
+    mix(hasher32(k.dip));
+    mix(hasher16(k.dport));
+    mix(hasher8(k.protocol));
+
+    return seed;
+  }
+};
+
+void netflow (char* trace_file) {
+    unordered_map<flow_key, flow_info, key_hasher> flows;   
     packet pkt;
+    // TODO use c++ open file
     FILE* file = fopen(trace_file, "rb");
     
     if (file == nullptr) {
@@ -326,69 +365,75 @@ void netflow (char* trace_file) {
         if (pkt.iph.protocol != UDP && pkt.iph.protocol != TCP) {
             continue;
         }
-        // if udp, 
-        // if new flow
-        if (pkt.iph.saddr != sip ||
-            pkt.iph.daddr != dip ||
-            pkt.iph.protocol != protocol ||
-            ((pkt.iph.protocol == UDP) && (pkt.udph.source != sport)) ||
-            ((pkt.iph.protocol == UDP) && (pkt.udph.dest != dport)) ||
-            ((pkt.iph.protocol == TCP) && (pkt.tcph.source != sport)) ||
-            ((pkt.iph.protocol == TCP) && (pkt.tcph.dest != dport)) 
-        ) {
-            // print out current flow if exist
-    //      sip sport dip dport protocol first_ts duration tot_pkts tot_payload_bytes
-           if (flowExist) {
-                char protocol = pkt.iph.protocol == UDP ? 'U' : 'T';
-                cout << dotted_quad(sip) << " " 
-                << to_string(sport) << " " 
-                << dotted_quad(dip) << " " 
-                << to_string(dport) << " " 
-                << protocol << " "
-                << format_ts(first_ts) << " "
-                << format_ts(duration) << " "
-                << tot_pkts << " "
-                << tot_payload_bytes << endl;
-           } 
+        uint16_t sport;
+        uint16_t dport;
+        int cur_paylen;
 
-            // start new flow (resetting fields)
-            flowExist = true;
-            sip = pkt.iph.saddr;
-            dip = pkt.iph.daddr;
-            protocol = pkt.iph.protocol;
-            sport = pkt.iph.protocol == UDP ? pkt.udph.source : pkt.tcph.source;
-            dport = pkt.iph.protocol == UDP ? pkt.udph.dest : pkt.tcph.dest;
-            first_ts = pkt.timestamp;
-            duration = timev{0,0};
-            tot_pkts = 1;
-            tot_payload_bytes = pkt.iph.protocol == UDP ? pkt.iph.tot_len - IP_HDR_LEN - UDP_HDR_LEN
-                                                        : pkt.iph.tot_len - IP_HDR_LEN - (pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD);
-        } else {
+        // set fields depending on transport protocol
+        if (pkt.iph.protocol == UDP) {
+            sport = pkt.udph.source;
+            dport = pkt.udph.dest;
+            cur_paylen = pkt.iph.tot_len - IP_HDR_LEN - UDP_HDR_LEN;
+        } else if (pkt.iph.protocol == TCP) {
+            sport = pkt.tcph.source;
+            dport = pkt.tcph.dest;
+            cur_paylen = pkt.iph.tot_len - IP_HDR_LEN - (pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD);
+        };
+
+        flow_key cur_flow_id = flow_key {
+            pkt.iph.saddr,
+            sport,
+            pkt.iph.daddr,
+            dport,
+            pkt.iph.protocol
+        };
+
+        if (flows.find(cur_flow_id) != flows.end()) {
             // update current flow with packet
-            duration = add_tv(duration, pkt.timestamp);
-            tot_pkts++;
-            tot_payload_bytes += pkt.iph.protocol == UDP ? pkt.iph.tot_len - IP_HDR_LEN - UDP_HDR_LEN
-                                                         : pkt.iph.tot_len - IP_HDR_LEN - (pkt.tcph.doff * NO_BYTES_PER_DOFF_WORD);
-        }
+            flow_info cur_flow_info = flows[cur_flow_id];
+
+            cur_flow_info.last_ts = pkt.timestamp;
+            cur_flow_info.tot_pkts++;
+            cur_flow_info.tot_payload_bytes += cur_paylen;
+            flows[cur_flow_id] = cur_flow_info;
+        } else {
+            // create new flow
+            timev first_ts = pkt.timestamp;
+            timev last_ts = pkt.timestamp;
+            int tot_pkts = 1;
+            int tot_payload_bytes = cur_paylen;
+            flows[cur_flow_id] = flow_info {
+                pkt.iph.saddr,
+                sport,
+                pkt.iph.daddr,
+                dport,
+                pkt.iph.protocol,
+                first_ts,
+                last_ts,
+                tot_pkts,
+                tot_payload_bytes
+            };
+        };
     }
-    // last flow of the file
-    cout << dotted_quad(sip) << " " 
-    << to_string(sport) << " " 
-    << dotted_quad(dip) << " " 
-    << to_string(dport) << " " 
-    << protocol << " "
-    << format_ts(first_ts) << " "
-    << format_ts(duration) << " "
-    << tot_pkts << " "
-    << tot_payload_bytes << endl;
-}
+
+    //printing out flow info
+    for (const auto& pair : flows) {
+        char protocol = pair.first.protocol == UDP ? 'U' : 'T';
+        timev duration = deduct_tv(pair.second.last_ts, pair.second.first_ts);
+        cout << dotted_quad(pair.first.sip) << " " 
+        << to_string(pair.first.sport) << " " 
+        << dotted_quad(pair.first.dip) << " " 
+        << to_string(pair.first.dport) << " " 
+        << protocol << " "
+        << format_ts(pair.second.first_ts) << " "
+        << format_ts(duration) << " "
+        << pair.second.tot_pkts << " "
+        << pair.second.tot_payload_bytes << endl;
+    }
+};
 
 void rtt (char* trace_file) {
     cout << "rtt mode" << endl;
-}
-
-void debug() {
-
 }
 
 int main (int argc, char *argv [])
@@ -409,10 +454,6 @@ int main (int argc, char *argv [])
     }
     else if (cmd_line_flags == (ARG_RTT_MODE | ARG_TRACE_FILE)) {
         rtt(trace_file);
-    }
-    // TODO: debugging, to delete
-    else if (cmd_line_flags == ARG_DEBUG) {
-        debug();
     }
     else
     {

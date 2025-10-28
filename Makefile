@@ -2,7 +2,7 @@ CC=gcc
 CXX=g++
 LD=g++
 CFLAGS=-Wall -Werror -g
-LDFLAGS=$(CFLAGS)
+LDFLAGS=$(CFLAGS) 
 
 TARGETS=proj3
 
