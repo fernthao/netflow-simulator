@@ -1,4 +1,4 @@
 .vscode
 proj3
-proj3.o
+*.o
 *.txt
