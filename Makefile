@@ -6,10 +6,13 @@ LDFLAGS=$(CFLAGS)
 
 TARGETS=proj3
 
+# Object files
+OBJS=main.o utils.o hashers.o packet_reader.o print_mode.o netflow_mode.o rtt_mode.o
+
 all: $(TARGETS)
 
-proj3: proj3.o
-	$(LD) $(LDFLAGS) -o $@ $<
+proj3: $(OBJS)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $<
